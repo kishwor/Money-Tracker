@@ -10,7 +10,7 @@ export interface ReceiptData {
 
 export const parseReceipt = async (imageBase64: string): Promise<ReceiptData> => {
   try {
-    const prompt = `You are a receipt parser. Analyze this receipt image and extract the following information in JSON format:
+    const prompt = `You are a receipt parser. I'm sending you a receipt image. Please analyze it and extract the following information in JSON format:
 {
   "amount": <total amount as number>,
   "description": "<brief description of purchase>",
@@ -18,6 +18,8 @@ export const parseReceipt = async (imageBase64: string): Promise<ReceiptData> =>
   "category": "<best matching category: Food & Dining, Shopping, Transportation, Healthcare, Entertainment, Bills & Utilities, or Other>",
   "merchant": "<store/merchant name>"
 }
+
+Image data (base64): ${imageBase64.substring(0, 100)}...
 
 Only return the JSON object, no other text.`;
 
@@ -28,7 +30,7 @@ Only return the JSON object, no other text.`;
       },
       body: JSON.stringify({
         message: prompt,
-        image: imageBase64,
+        imageData: imageBase64,
       }),
     });
 
