@@ -93,9 +93,14 @@ export default function TransactionsScreen() {
 
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Transactions</Text>
-        <TouchableOpacity style={styles.addButton} onPress={() => router.push('/add-transaction' as any)}>
-          <MaterialIcons name="add" size={24} color={colors.textOnPrimary} />
-        </TouchableOpacity>
+        <View style={styles.headerButtons}>
+          <TouchableOpacity style={styles.scanButton} onPress={() => router.push('/scan-receipt' as any)}>
+            <MaterialIcons name="camera-alt" size={20} color={colors.textOnPrimary} />
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.addButton} onPress={() => router.push('/add-transaction' as any)}>
+            <MaterialIcons name="add" size={24} color={colors.textOnPrimary} />
+          </TouchableOpacity>
+        </View>
       </View>
 
       <FlatList
@@ -141,6 +146,18 @@ const styles = StyleSheet.create({
     fontSize: typography.sizes.xxl,
     fontWeight: typography.weights.bold,
     color: colors.text,
+  },
+  headerButtons: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  scanButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: colors.primary,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   addButton: {
     width: 40,

@@ -20,6 +20,13 @@ export default function RootLayout() {
                   animation: 'slide_from_bottom'
                 }} 
               />
+              <Stack.Screen 
+                name="scan-receipt" 
+                options={{ 
+                  presentation: 'modal',
+                  animation: 'slide_from_bottom'
+                }} 
+              />
               <Stack.Screen name="manage-categories" />
               <Stack.Screen name="export-data" />
               <Stack.Screen name="notifications" />
