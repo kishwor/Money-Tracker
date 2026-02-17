@@ -69,14 +69,16 @@ export const initializeDefaultCategories = async (userId: string): Promise<void>
 
   const { error } = await supabase
     .from('categories')
-    .insert(
+    .upsert(
       defaultCategories.map(cat => ({
         user_id: userId,
         ...cat,
-      }))
+      })),
+      {
+        onConflict: 'user_id,name,type',
+        ignoreDuplicates: true,
+      }
     );
 
-  if (error && !error.message.includes('duplicate')) {
-    throw error;
-  }
+  if (error) throw error;
 };
