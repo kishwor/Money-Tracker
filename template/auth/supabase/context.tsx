@@ -1,5 +1,5 @@
 // @ts-nocheck
-import React, { createContext, useContext, useState, useEffect, ReactNode, useMemo } from 'react';
+import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { AuthUser } from '../types';
 import { authService } from './service';
 
@@ -12,6 +12,7 @@ interface AuthContextState {
 
 interface AuthContextActions {
   setOperationLoading: (loading: boolean) => void;
+  setUser: (user: AuthUser | null) => void;
 }
 
 type AuthContextType = AuthContextState & AuthContextActions;
@@ -39,6 +40,10 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
   const setOperationLoading = (loading: boolean) => {
     updateState({ operationLoading: loading });
+  };
+
+  const setUser = (user: AuthUser | null) => {
+    updateState({ user });
   };
 
   useEffect(() => {
@@ -88,6 +93,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
   const contextValue: AuthContextType = {
     ...state,
     setOperationLoading,
+    setUser,
   };
 
   return (

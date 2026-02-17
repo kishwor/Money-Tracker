@@ -1,7 +1,6 @@
 // @ts-nocheck
 import { AuthUser, SendOTPOptions, SignUpResult, GoogleSignInResult } from '../types';
 import { safeSupabaseOperation, getSharedSupabaseClient } from '../../core/client';
-import { configManager } from '../../core/config';
 import { Platform } from 'react-native';
 import * as AuthSession from 'expo-auth-session';
 import * as WebBrowser from 'expo-web-browser';
@@ -17,10 +16,18 @@ let visibilityListener: (() => void) | null = null;
 let isUpdatingUserInOTPFlow = false;
 
 const TIMEOUT_CONFIG = {
-  AUTH_OPERATIONS: 10000,
-  DATA_QUERIES: 8000,  
-  SESSION_REFRESH: 5000,
-  USER_UPDATE: 15000,
+  AUTH_OPERATIONS: 15000,
+  OTP_SEND: 30000,
+  DATA_QUERIES: 10000,  
+  SESSION_REFRESH: 8000,
+  USER_UPDATE: 20000,
+};
+
+const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+const isTimeoutErrorMessage = (message?: string): boolean => {
+  if (!message) return false;
+  return message.toLowerCase().includes('timeout');
 };
 
 // Utility function to add timeout to any Promise with proper cleanup
@@ -43,7 +50,7 @@ const withTimeout = <T>(
 };
 
 const isAuthError = (error: any): boolean => {
-  if (error.message?.includes('timeout')) return false;
+  if (isTimeoutErrorMessage(error.message)) return false;
   return error.status === 401 || 
          error.status === 403 || 
          error.message?.includes('invalid_token');
@@ -107,7 +114,7 @@ export class AuthService {
         
         if (error) throw error;
         return session;
-      }, true);
+      });
       
       if (!session?.user) return null;
 
@@ -115,8 +122,6 @@ export class AuthService {
       return this.mapSessionToAuthUser(session.user);
 
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown getCurrentUser error';
-      
       if (isAuthError(error)) {
         return null;
       }
@@ -143,22 +148,57 @@ export class AuthService {
   async sendOTP(email: string, options: SendOTPOptions = {}) {
     try {
       const { shouldCreateUser = true, emailRedirectTo } = options;
+      const resolvedEmailRedirectTo =
+        emailRedirectTo ||
+        (Platform.OS === 'web' && typeof window !== 'undefined'
+          ? `${window.location.origin}/login`
+          : undefined);
+      const signInOptions: any = { shouldCreateUser };
+
+      if (resolvedEmailRedirectTo) {
+        signInOptions.emailRedirectTo = resolvedEmailRedirectTo;
+      }
       
       return await safeSupabaseOperation(async (client) => {
-        const { error } = await withTimeout(
-          client.auth.signInWithOtp({
-            email,
-            options: {
-              shouldCreateUser,
-              emailRedirectTo,
-            }
-          }),
-          TIMEOUT_CONFIG.AUTH_OPERATIONS,
-          'SendOTP'
-        );
+        const executeSendOTP = async () =>
+          withTimeout(
+            client.auth.signInWithOtp({
+              email,
+              options: signInOptions,
+            }),
+            TIMEOUT_CONFIG.OTP_SEND,
+            'SendOTP'
+          );
+
+        let result;
+        try {
+          result = await executeSendOTP();
+        } catch (requestError) {
+          const requestErrorMessage =
+            requestError instanceof Error ? requestError.message : 'Unknown sendOTP request error';
+
+          // Retry once for transient timeout spikes
+          if (isTimeoutErrorMessage(requestErrorMessage)) {
+            await wait(1200);
+            result = await executeSendOTP();
+          } else {
+            throw requestError;
+          }
+        }
+        
+        const { error } = result;
         
         if (error) {
-          if (error.message.includes('timeout')) {
+          const lowerMessage = error.message.toLowerCase();
+
+          if (lowerMessage.includes('rate limit') || lowerMessage.includes('too many requests')) {
+            return {
+              error: 'Too many verification requests. Please wait 2 minutes and try again.',
+              errorType: 'business',
+            };
+          }
+
+          if (isTimeoutErrorMessage(error.message)) {
             return { error: 'Network is slow, please retry', errorType: 'timeout' };
           }
           return { error: error.message, errorType: 'business' };
@@ -169,12 +209,90 @@ export class AuthService {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown sendOTP error';
       console.warn('[Template:AuthService] SendOTP system exception:', errorMessage);
+      const lowerMessage = errorMessage.toLowerCase();
+
+      if (lowerMessage.includes('rate limit') || lowerMessage.includes('too many requests')) {
+        return {
+          error: 'Too many verification requests. Please wait 2 minutes and try again.',
+          errorType: 'business',
+        };
+      }
       
-      if (errorMessage.includes('timeout')) {
-        return { error: 'Network connection timeout, please check network and retry', errorType: 'timeout' };
+      if (isTimeoutErrorMessage(errorMessage)) {
+        return {
+          error: 'Verification email is taking longer than expected. Wait a few seconds, then retry once.',
+          errorType: 'timeout'
+        };
       }
       
       return { error: 'Failed to send verification code', errorType: 'network' };
+    }
+  }
+
+  async resendSignupOTP(email: string, options: Pick<SendOTPOptions, 'emailRedirectTo'> = {}) {
+    try {
+      const { emailRedirectTo } = options;
+      const resolvedEmailRedirectTo =
+        emailRedirectTo ||
+        (Platform.OS === 'web' && typeof window !== 'undefined'
+          ? `${window.location.origin}/login`
+          : undefined);
+
+      return await safeSupabaseOperation(async (client) => {
+        const { error } = await withTimeout(
+          client.auth.resend({
+            type: 'signup',
+            email,
+            ...(resolvedEmailRedirectTo
+              ? {
+                  options: {
+                    emailRedirectTo: resolvedEmailRedirectTo,
+                  },
+                }
+              : {}),
+          }),
+          TIMEOUT_CONFIG.OTP_SEND,
+          'ResendSignupOTP'
+        );
+
+        if (error) {
+          const lowerMessage = error.message.toLowerCase();
+
+          if (lowerMessage.includes('rate limit') || lowerMessage.includes('too many requests')) {
+            return {
+              error: 'Too many verification requests. Please wait 2 minutes and try again.',
+              errorType: 'business',
+            };
+          }
+
+          if (isTimeoutErrorMessage(error.message)) {
+            return { error: 'Network is slow, please retry', errorType: 'timeout' };
+          }
+          return { error: error.message, errorType: 'business' };
+        }
+
+        return {};
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown resendSignupOTP error';
+      console.warn('[Template:AuthService] ResendSignupOTP system exception:', errorMessage);
+      const lowerMessage = errorMessage.toLowerCase();
+
+      if (lowerMessage.includes('rate limit') || lowerMessage.includes('too many requests')) {
+        return {
+          error: 'Too many verification requests. Please wait 2 minutes and try again.',
+          errorType: 'business',
+        };
+      }
+
+      if (isTimeoutErrorMessage(errorMessage)) {
+        return {
+          error: 'Verification email is taking longer than expected. Wait a few seconds, then retry once.',
+          errorType: 'timeout',
+        };
+      }
+
+      return { error: 'Failed to resend verification code', errorType: 'network' };
     }
   }
 
@@ -182,15 +300,41 @@ export class AuthService {
     try {
       return await safeSupabaseOperation(async (client) => {
         // Step 1: Verify OTP first
-        const { data, error } = await withTimeout(
-          client.auth.verifyOtp({
-            email,
-            token: otp,
-            type: 'email'
-          }),
-          TIMEOUT_CONFIG.AUTH_OPERATIONS,
-          'VerifyOTP'
-        );
+        // Prefer `signup` for signup-code emails, fallback to `email` for compatibility.
+        const verifyTypes: ('signup' | 'email')[] = ['signup', 'email'];
+        let data: any = null;
+        let error: any = null;
+
+        for (const verifyType of verifyTypes) {
+          const result = await withTimeout(
+            client.auth.verifyOtp({
+              email,
+              token: otp,
+              type: verifyType,
+            }),
+            TIMEOUT_CONFIG.AUTH_OPERATIONS,
+            `VerifyOTP:${verifyType}`
+          );
+
+          if (!result.error) {
+            data = result.data;
+            error = null;
+            break;
+          }
+
+          error = result.error;
+          const lowerMessage = (result.error.message || '').toLowerCase();
+          const shouldTryFallback =
+            verifyType === 'signup' &&
+            (lowerMessage.includes('invalid') ||
+              lowerMessage.includes('expired') ||
+              lowerMessage.includes('otp') ||
+              lowerMessage.includes('token'));
+
+          if (!shouldTryFallback) {
+            break;
+          }
+        }
 
         if (error) {
           if (error.message.includes('Database error saving new user')) {
@@ -198,7 +342,7 @@ export class AuthService {
             console.warn('[Template:AuthService] Please refer to SDK documentation to set up user_profiles table and triggers');
           }
           
-          if (error.message.includes('timeout')) {
+          if (isTimeoutErrorMessage(error.message)) {
             return { error: 'Verification timeout, please retry', user: null, errorType: 'timeout' };
           }
           
@@ -209,33 +353,65 @@ export class AuthService {
   
           // Step 2: Update user with password if provided (with deadlock prevention)
           if (options?.password) {
-            
             try {
               // Set flag to prevent deadlock
               isUpdatingUserInOTPFlow = true;
-              
-              const { data: updateData, error: updateError } = await withTimeout(
-                client.auth.updateUser({ password: options.password }),
-                TIMEOUT_CONFIG.USER_UPDATE,
-                'UpdateUser'
-              );
-              
-              
-              if (updateError) {
-                console.warn('[Template:AuthService] User update failed after OTP verification:', updateError.message);
-                // Note: We don't fail the entire operation if user update fails
-                // The user is still successfully authenticated via OTP
+
+              let passwordUpdated = false;
+              let lastUpdateError: Error | null = null;
+              const retryDelays = [0, 600, 1200];
+
+              for (const delayMs of retryDelays) {
+                if (delayMs > 0) {
+                  await wait(delayMs);
+                }
+
+                try {
+                  const { error: updateError } = await withTimeout(
+                    client.auth.updateUser({ password: options.password }),
+                    TIMEOUT_CONFIG.USER_UPDATE,
+                    'UpdateUser'
+                  );
+
+                  if (!updateError) {
+                    passwordUpdated = true;
+                    break;
+                  }
+
+                  lastUpdateError = new Error(updateError.message);
+                } catch (attemptError) {
+                  const message = attemptError instanceof Error ? attemptError.message : 'Unknown update error';
+                  lastUpdateError = new Error(message);
+                }
               }
-              
+
+              if (!passwordUpdated) {
+                console.warn(
+                  '[Template:AuthService] Password setup failed after OTP verification:',
+                  lastUpdateError?.message || 'Unknown update error'
+                );
+
+                // Avoid leaving the user in a half-complete authenticated state.
+                await client.auth.signOut();
+                isUpdatingUserInOTPFlow = false;
+                return {
+                  error: 'Verification succeeded, but password setup failed. Please try again.',
+                  user: null,
+                  errorType: 'business',
+                };
+              }
+
               // Clear flag after a delay to ensure all events are processed
               setTimeout(() => {
                 isUpdatingUserInOTPFlow = false;
               }, 2000);
-              
-            } catch (updateError) {
-              // Clear flag on error
+            } catch {
               isUpdatingUserInOTPFlow = false;
-              // Continue with the authentication flow
+              return {
+                error: 'Verification succeeded, but password setup failed. Please try again.',
+                user: null,
+                errorType: 'business',
+              };
             }
           }
 
@@ -261,9 +437,7 @@ export class AuthService {
               };
               return { user: fallbackUser };
             }
-          } catch (userError) {
-            const errorMessage = userError instanceof Error ? userError.message : 'Unknown error';
-            
+          } catch {
             // Use fallback data
             const fallbackUser: AuthUser = {
               id: data.user.id,
@@ -285,7 +459,7 @@ export class AuthService {
       // Clear flag on any error
       isUpdatingUserInOTPFlow = false;
       
-      if (errorMessage.includes('timeout')) {
+      if (isTimeoutErrorMessage(errorMessage)) {
         return { error: 'Login timeout, please retry', user: null, errorType: 'timeout' };
       }
       
@@ -309,7 +483,7 @@ export class AuthService {
         );
 
         if (error) {
-          if (error.message.includes('timeout')) {
+          if (isTimeoutErrorMessage(error.message)) {
             return { error: 'Sign up timeout, please retry', errorType: 'timeout' };
           }
           return { error: error.message, errorType: 'business' };
@@ -325,10 +499,15 @@ export class AuthService {
         if (data.user && data.session) {
           try {
             const authUser = await this.getCurrentUser();
-            return { user: authUser };
+            if (authUser) {
+              return { user: authUser };
+            }
+
+            // Fallback: Supabase already returned a valid user/session.
+            return { user: this.mapSessionToAuthUser(data.user) };
           } catch (userError) {
             console.warn('[Template:AuthService] Error retrieving user after signup:', userError);
-            return { error: 'Sign up succeeded but failed to load profile', user: null, errorType: 'network' };
+            return { user: this.mapSessionToAuthUser(data.user) };
           }
         }
         
@@ -338,7 +517,7 @@ export class AuthService {
       const errorMessage = error instanceof Error ? error.message : 'Unknown signUp error';
       console.warn('[Template:AuthService] SignUpWithPassword system exception:', errorMessage);
       
-      if (errorMessage.includes('timeout')) {
+      if (isTimeoutErrorMessage(errorMessage)) {
         return { error: 'Sign up timeout, please retry', errorType: 'timeout' };
       }
       
@@ -359,24 +538,27 @@ export class AuthService {
         );
 
         if (error) {
-          if (error.message.includes('timeout')) {
+          if (isTimeoutErrorMessage(error.message)) {
             return { error: 'Sign in timeout, please retry', user: null, errorType: 'timeout' };
           }
           return { error: error.message, user: null, errorType: 'business' };
         }
 
-        if (data.user) {
+        const signedInUser = data.user || data.session?.user;
+
+        if (signedInUser) {
           try {
             const authUser = await this.getCurrentUser();
             
             if (authUser) {
               return { user: authUser };
             } else {
-              return { error: 'Failed to load user profile', user: null, errorType: 'business' };
+              // Fallback for brief session propagation delay.
+              return { user: this.mapSessionToAuthUser(signedInUser) };
             }
           } catch (userError) {
             console.warn('[Template:AuthService] Error retrieving user after sign in:', userError);
-            return { error: 'Sign in succeeded but failed to load profile', user: null, errorType: 'network' };
+            return { user: this.mapSessionToAuthUser(signedInUser) };
           }
         }
         
@@ -386,7 +568,7 @@ export class AuthService {
       const errorMessage = error instanceof Error ? error.message : 'Unknown signIn error';
       console.warn('[Template:AuthService] SignInWithPassword system exception:', errorMessage);
       
-      if (errorMessage.includes('timeout')) {
+      if (isTimeoutErrorMessage(errorMessage)) {
         return { error: 'Sign in timeout, please retry', user: null, errorType: 'timeout' };
       }
       
@@ -404,7 +586,7 @@ export class AuthService {
         );
         
         if (error) {
-          if (error.message.includes('timeout')) {
+          if (isTimeoutErrorMessage(error.message)) {
             return { error: 'Logout timeout, please retry', errorType: 'timeout' };
           }
           return { error: error.message, errorType: 'business' };
@@ -416,7 +598,7 @@ export class AuthService {
       const errorMessage = error instanceof Error ? error.message : 'Unknown logout error';
       console.warn('[Template:AuthService] Logout system exception:', errorMessage);
       
-      if (errorMessage.includes('timeout')) {
+      if (isTimeoutErrorMessage(errorMessage)) {
         return { error: 'Logout timeout, please check network and retry', errorType: 'timeout' };
       }
       
@@ -434,7 +616,7 @@ export class AuthService {
         );
         
         if (error) {
-          if (error.message.includes('timeout')) {
+          if (isTimeoutErrorMessage(error.message)) {
             console.warn('[Template:AuthService] Session refresh timeout');
           } else {
             console.warn('[Template:AuthService] Refresh session error:', error);
@@ -561,7 +743,7 @@ export class AuthService {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown Google login error';
       
-      if (errorMessage.includes('timeout')) {
+      if (isTimeoutErrorMessage(errorMessage)) {
         return { error: 'Google login timeout, please retry' };
       }
       

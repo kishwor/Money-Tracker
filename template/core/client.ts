@@ -2,13 +2,55 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as ExpoCrypto from 'expo-crypto';
 import 'react-native-url-polyfill/auto';
-import { SupabaseConfig } from './types';
 
 class SupabaseManager {
   private static instance: SupabaseClient | null = null;
   private static creating = false;
   private static creationCount = 0;
+
+  private static ensurePKCECryptoSupport() {
+    if (Platform.OS === 'web') return;
+
+    const globalAny = globalThis as any;
+
+    if (!globalAny.crypto) {
+      globalAny.crypto = {};
+    }
+
+    if (typeof globalAny.crypto.getRandomValues !== 'function') {
+      globalAny.crypto.getRandomValues = (typedArray: any) => ExpoCrypto.getRandomValues(typedArray);
+    }
+
+    if (typeof globalAny.crypto.randomUUID !== 'function') {
+      globalAny.crypto.randomUUID = () => ExpoCrypto.randomUUID();
+    }
+
+    if (!globalAny.crypto.subtle) {
+      globalAny.crypto.subtle = {};
+    }
+
+    if (typeof globalAny.crypto.subtle.digest !== 'function') {
+      globalAny.crypto.subtle.digest = async (algorithm: any, data: BufferSource) => {
+        const name = typeof algorithm === 'string' ? algorithm : algorithm?.name;
+        const normalized = String(name || '').toUpperCase().replace(/-/g, '');
+        const digestMap: Record<string, ExpoCrypto.CryptoDigestAlgorithm> = {
+          SHA1: ExpoCrypto.CryptoDigestAlgorithm.SHA1,
+          SHA256: ExpoCrypto.CryptoDigestAlgorithm.SHA256,
+          SHA384: ExpoCrypto.CryptoDigestAlgorithm.SHA384,
+          SHA512: ExpoCrypto.CryptoDigestAlgorithm.SHA512,
+        };
+
+        const expoAlgorithm = digestMap[normalized];
+        if (!expoAlgorithm) {
+          throw new Error(`[Template:Client] Unsupported digest algorithm: ${name}`);
+        }
+
+        return ExpoCrypto.digest(expoAlgorithm, data);
+      };
+    }
+  }
 
   static getClient(): SupabaseClient {
 
@@ -40,6 +82,8 @@ class SupabaseManager {
         console.warn(`[Template:Client] ⚠️ Multiple client creation detected! This is creation #${this.creationCount}`);
         console.warn('[Template:Client] This may indicate a development environment hot reload or architecture issue.');
       }
+
+      this.ensurePKCECryptoSupport();
       
       this.instance = createClient(supabaseUrl, supabaseAnonKey, {
         auth: {
@@ -99,4 +143,3 @@ export const safeSupabaseOperation = async <T>(
   const client = getSharedSupabaseClient();
   return await operation(client);
 };
-

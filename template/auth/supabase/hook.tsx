@@ -19,6 +19,9 @@ export function useAuth(): AuthContextType {
       sendOTP: async (): Promise<SendOTPResult> => ({ 
         error: 'Auth function not enabled, please check configuration' 
       }),
+      resendSignupOTP: async (): Promise<SendOTPResult> => ({
+        error: 'Auth function not enabled, please check configuration'
+      }),
       verifyOTPAndLogin: async (): Promise<AuthResult> => ({ 
         error: 'Auth function not enabled, please check configuration', 
         user: null 
@@ -61,10 +64,28 @@ export function useAuth(): AuthContextType {
     }
   };
 
-    const verifyOTPAndLogin = async (email: string, otp: string, options?: { password?: string }): Promise<AuthResult> => {
+  const resendSignupOTP = async (email: string): Promise<SendOTPResult> => {
+    context.setOperationLoading(true);
+    try {
+      const result = await authService.resendSignupOTP(email);
+      return result;
+    } catch (error) {
+      console.warn('[Template:useAuth] resendSignupOTP exception:', error);
+      return {
+        error: 'Failed to resend verification code'
+      };
+    } finally {
+      context.setOperationLoading(false);
+    }
+  };
+
+  const verifyOTPAndLogin = async (email: string, otp: string, options?: { password?: string }): Promise<AuthResult> => {
     context.setOperationLoading(true);
     try {
       const result = await authService.verifyOTPAndLogin(email, otp, options);
+      if (result.user) {
+        context.setUser(result.user);
+      }
       return result;
     } catch (error) {
       console.warn('[Template:useAuth] verifyOTPAndLogin exception:', error);
@@ -81,6 +102,9 @@ export function useAuth(): AuthContextType {
     context.setOperationLoading(true);
     try {
       const result = await authService.signUpWithPassword(email, password, metadata);
+      if (result.user) {
+        context.setUser(result.user);
+      }
       return result;
     } catch (error) {
       console.warn('[Template:useAuth] signUpWithPassword exception:', error);
@@ -97,6 +121,9 @@ export function useAuth(): AuthContextType {
     context.setOperationLoading(true);
     try {
       const result = await authService.signInWithPassword(email, password);
+      if (result.user) {
+        context.setUser(result.user);
+      }
       return result;
     } catch (error) {
       console.warn('[Template:useAuth] signInWithPassword exception:', error);
@@ -117,6 +144,10 @@ export function useAuth(): AuthContextType {
       if (!result) {
         console.warn('[Template:useAuth] Invalid logout result format:', result);
         return { error: 'Invalid logout response' };
+      }
+
+      if (!result.error) {
+        context.setUser(null);
       }
       
       return result;
@@ -159,6 +190,7 @@ export function useAuth(): AuthContextType {
     initialized: context.initialized,
     setOperationLoading: context.setOperationLoading,
     sendOTP,
+    resendSignupOTP,
     verifyOTPAndLogin,
     signUpWithPassword,
     signInWithPassword,
